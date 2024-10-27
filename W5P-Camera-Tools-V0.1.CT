@@ -1,0 +1,1321 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CheatTable CheatEngineTableVersion="45">
+  <CheatEntries>
+    <CheatEntry>
+      <ID>463</ID>
+      <Description>"Freecam-Dmr-Movement-Implementation"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>globalalloc(cheaton,4) // global variable for createThread on/off
+
+cheaton:
+dd 0
+
+{$lua}
+
+if syntaxcheck then return end
+
+[ENABLE]
+
+{$asm}
+{$lua}
+
+local pitchIncrement = 0.005 -- Pitch speed
+local yawIncrement = 0.005 -- Yaw speed
+local rollIncrement = 0.05 -- Roll speed
+local moveSpeed = 0.075 -- Fly speed
+
+local pitch = 0
+local yaw = 0
+local roll = 0
+
+function clampAngle(angle)
+    if angle &gt; 180 then
+        angle = angle - 360
+    elseif angle &lt; -180 then
+        angle = angle + 360
+    end
+    return angle
+end
+
+function getMatrix(x, y)
+    local matrixBase = getAddress("wmn5r.exe+1F52440")
+    if x == 1 then -- determine the column of the matrix
+        matrixBase = matrixBase + 0x0
+    elseif x == 2 then
+        matrixBase = matrixBase + 0x10
+    elseif x == 3 then
+        matrixBase = matrixBase + 0x20
+    end
+
+    if y == 1 then -- determine the row of the matrix
+        matrixBase = matrixBase + 0x0
+    elseif y == 2 then
+        matrixBase = matrixBase + 0x4
+    elseif y == 3 then
+        matrixBase = matrixBase + 0x8
+    end
+
+    return readFloat(matrixBase)
+end
+
+function matToRot(axis)
+    local result
+    if axis == "x" then
+        result = math.atan2(getMatrix(3, 2), getMatrix(3, 3))
+    elseif axis == "y" then
+        result = math.atan2(-getMatrix(3, 1), math.sqrt(getMatrix(3, 2) * getMatrix(3, 2) + getMatrix(3, 3) * getMatrix(3, 3)))
+    elseif axis == "z" then
+        result = math.atan2(getMatrix(2, 1), getMatrix(1, 1))
+    end
+
+    return math.deg(result)
+end
+
+function rotToMat(x, y, z)
+    -- input values from user
+    x = math.rad(x)
+    y = math.rad(y)
+    z = math.rad(z + 180)
+
+    -- convert to quaternion
+    local sinTh = math.cos(z / 2)
+    local ry = math.cos(x / 2)
+    local sinth3 = math.cos(y / 2)
+    local cosTh = math.sin(z / 2)
+    local rx = math.sin(x / 2)
+    local costh3 = math.sin(y / 2)
+
+    local q0 = cosTh * ry * sinth3 + sinTh * rx * costh3
+    local q1 = sinTh * rx * sinth3 - cosTh * ry * costh3
+    local q2 = sinTh * ry * costh3 + cosTh * rx * sinth3
+    local q3 = sinTh * ry * sinth3 - cosTh * rx * costh3
+
+    -- convert to mat
+    local result = {
+        2 * (q0 * q0 + q1 * q1) - 1,
+        2 * (q1 * q2 - q0 * q3),
+        2 * (q1 * q3 + q0 * q2),
+        2 * (q1 * q2 + q0 * q3),
+        2 * (q0 * q0 + q2 * q2) - 1,
+        2 * (q2 * q3 - q0 * q1),
+        2 * (q1 * q3 - q0 * q2),
+        2 * (q2 * q3 + q0 * q1),
+        2 * (q0 * q0 + q3 * q3) - 1
+    }
+
+    local node = getAddress("wmn5r.exe+1F52440")
+    for i = 1, 3, 1 do
+        writeFloat(node + ((i - 1) * 4), result[i])
+    end
+    node = node + 0x10
+    for i = 4, 6, 1 do
+        writeFloat(node + ((i - 3 - 1) * 4), result[i])
+    end
+    node = node + 0x10
+    for i = 7, 9, 1 do
+        writeFloat(node + ((i - 6 - 1) * 4), result[i])
+    end
+end
+
+-- Func: Free-fly movement
+function getPosition()
+    local x = readFloat("wmn5r.exe+1F52470")
+    local y = readFloat("wmn5r.exe+1F52474")
+    local z = readFloat("wmn5r.exe+1F52478")
+    return x, y, z
+end
+
+function setPosition(x, y, z)
+    writeFloat("wmn5r.exe+1F52470", x)
+    writeFloat("wmn5r.exe+1F52474", y)
+    writeFloat("wmn5r.exe+1F52478", z)
+end
+
+createNativeThread(function(timer)
+    sleep(200) -- delay for giving script time to write for "cheaton" proper value
+    while readFloat("cheaton") == 0 do -- while "cheaton" value equals "0" this cheat works
+        sleep(0) -- like timer interval
+        -- Movement
+        local mv_forward = isKeyPressed(VK_W) -- Key : W
+        local mv_backward = isKeyPressed(VK_S) -- Key : S
+        local mv_strafe_left = isKeyPressed(VK_A) -- Key : A
+        local mv_strafe_right = isKeyPressed(VK_D) -- Key : D
+        -- Rotation
+        local lk_up = isKeyPressed(VK_UP) -- Pitch Up
+        local lk_down = isKeyPressed(VK_DOWN) -- Pitch Down
+        local lk_left = isKeyPressed(VK_LEFT) -- Yaw Left
+        local lk_right = isKeyPressed(VK_RIGHT) -- Yaw Right
+        local roll_left = isKeyPressed(VK_Q) -- Roll left
+        local roll_right = isKeyPressed(VK_E) -- Roll right
+        local roll_reset = isKeyPressed(VK_R) -- Reset roll
+        -- Debug
+        local printval = isKeyPressed(VK_P)
+
+        -- Adjust pitch, yaw, and roll based on key presses
+        if lk_up then
+            pitch = clampAngle(pitch + pitchIncrement)
+        elseif lk_down then
+            pitch = clampAngle(pitch - pitchIncrement)
+        end
+
+        if lk_left then
+            yaw = clampAngle(yaw - yawIncrement)
+        elseif lk_right then
+            yaw = clampAngle(yaw + yawIncrement)
+        end
+
+        if roll_left then
+            roll = clampAngle(roll - rollIncrement)
+        elseif roll_right then
+            roll = clampAngle(roll + rollIncrement)
+        end
+
+        if roll_reset then
+            roll = 0 -- Reset roll
+        end
+
+        rotToMat(yaw, pitch, roll)
+
+        local x, y, z = getPosition()
+
+        if mv_forward or mv_backward or mv_strafe_left or mv_strafe_right then
+            local forwardVector = {
+                x = -getMatrix(3, 1),
+                y = -getMatrix(3, 2),
+                z = -getMatrix(3, 3)
+            }
+
+            local rightVector = {
+                x = getMatrix(1, 1),
+                y = getMatrix(1, 2),
+                z = getMatrix(1, 3)
+            }
+
+            if mv_forward then
+                x = x + forwardVector.x * moveSpeed
+                y = y + forwardVector.y * moveSpeed
+                z = z + forwardVector.z * moveSpeed
+            elseif mv_backward then
+                x = x - forwardVector.x * moveSpeed
+                y = y - forwardVector.y * moveSpeed
+                z = z - forwardVector.z * moveSpeed
+            end
+
+            if mv_strafe_left then
+                x = x - rightVector.x * moveSpeed
+                y = y - rightVector.y * moveSpeed
+                z = z - rightVector.z * moveSpeed
+            elseif mv_strafe_right then
+                x = x + rightVector.x * moveSpeed
+                y = y + rightVector.y * moveSpeed
+                z = z + rightVector.z * moveSpeed
+            end
+
+            setPosition(x, y, z)
+        end
+
+
+        -- Debug output
+        if printval then
+           print("Pitch: " .. pitch .. " Yaw: " .. yaw .. " Roll: " .. roll)
+        end
+    end
+end)
+
+[DISABLE]
+
+{$asm}
+cheaton:
+dd 1 // give to "cheaton" any other value than "0" for stop thread from LUA
+
+
+
+</AssemblerScript>
+      <Hotkeys>
+        <Hotkey>
+          <Action>Activate</Action>
+          <Keys/>
+          <ID>0</ID>
+        </Hotkey>
+        <Hotkey>
+          <Action>Deactivate</Action>
+          <Keys/>
+          <ID>1</ID>
+        </Hotkey>
+      </Hotkeys>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>469</ID>
+      <Description>"Freecam-Dmr-Orbit-Implementation-Lookat-fixed"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>globalalloc(cheaton,4) // global variable for createThread on/off
+
+cheaton:
+dd 0
+
+{$lua}
+
+if syntaxcheck then return end
+
+[ENABLE]
+
+{$asm}
+{$lua}
+
+local pitchIncrement = 0.005 -- Pitch Speed
+local yawIncrement = 0.005 -- Yaw Speed
+local rollIncrement = 0.05 -- Roll Speed
+
+local orbitPitch = 0
+local orbitYaw = 0
+local orbitDistance = 10.0 -- Initial Cam Distance
+
+function clampAngle(angle)
+    if angle &gt; 180 then
+        angle = angle - 360
+    elseif angle &lt; -180 then
+        angle = angle + 360
+    end
+    return angle
+end
+
+-- Func: Get car coordinates
+function getCarPosition(carIndex)
+    local baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+0]")
+    local offset = 0x1D4
+    local x = readFloat(baseAddress + offset)
+    local y = readFloat(baseAddress + offset + 0x4)
+    local z = readFloat(baseAddress + offset + 0x8)
+    return x, y, z
+end
+
+-- Func : Cam Update
+function updateOrbitCamera()
+    local carX, carY, carZ = getCarPosition(1) -- Assuming Car1 is the player car
+
+    -- Degree to Radians
+    local pitchRad = math.rad(orbitPitch)
+    local yawRad = math.rad(orbitYaw)
+
+    -- Calculate camera position based on spherical coordinates
+    local camX = carX + orbitDistance * math.cos(pitchRad) * math.cos(yawRad)
+    local camY = carY + orbitDistance * math.sin(pitchRad)
+    local camZ = carZ + orbitDistance * math.cos(pitchRad) * math.sin(yawRad)
+
+    -- Set the camera pos
+    writeFloat("wmn5r.exe+1F52470", camX)
+    writeFloat("wmn5r.exe+1F52474", camY)
+    writeFloat("wmn5r.exe+1F52478", camZ)
+
+    -- Calculate the direction vector from the camera to the car
+    local dirX = carX - camX
+    local dirY = carY - camY
+    local dirZ = carZ - camZ
+
+    -- Normalize the direction vector
+    local length = math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
+    dirX = dirX / length
+    dirY = dirY / length
+    dirZ = dirZ / length
+
+    -- Assume an up vector (0, 1, 0) for simplicity
+    local upX, upY, upZ = 0, 1, 0
+
+    -- Calculate the right vector using cross product
+    local rightX = upY * dirZ - upZ * dirY
+    local rightY = upZ * dirX - upX * dirZ
+    local rightZ = upX * dirY - upY * dirX
+
+
+    -- Normalize the right vector
+    local rightLength = math.sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ)
+    rightX = rightX / rightLength
+    rightY = rightY / rightLength
+    rightZ = rightZ / rightLength
+
+    -- Recalculate the up vector to ensure orthogonality
+    upX = dirY * rightZ - dirZ * rightY
+    upY = dirZ * rightX - dirX * rightZ
+    upZ = dirX * rightY - dirY * rightX
+
+    -- Invert the right vector to look at the car correctly
+    rightX = -rightX
+    rightY = -rightY
+    rightZ = -rightZ
+    dirX = -dirX
+    dirY = -dirY
+    dirZ = -dirZ
+
+    -- Write the rotation matrix
+    local node = getAddress("wmn5r.exe+1F52440")
+    writeFloat(node, rightX)
+    writeFloat(node + 0x4, rightY)
+    writeFloat(node + 0x8, rightZ)
+    writeFloat(node + 0x10, upX)
+    writeFloat(node + 0x14, upY)
+    writeFloat(node + 0x18, upZ)
+    writeFloat(node + 0x20, dirX)
+    writeFloat(node + 0x24, dirY)
+    writeFloat(node + 0x28, dirZ)
+end
+
+createNativeThread(function(timer)
+    sleep(200) -- delay for giving script time to write for "cheaton" proper value
+    while readFloat("cheaton") == 0 do -- while "cheaton" value equals "0" this cheat works
+        sleep(0) -- like timer interval
+        -- Movement
+        local lk_up = isKeyPressed(VK_UP) -- Up arrow
+        local lk_down = isKeyPressed(VK_DOWN) -- Down arrow
+        local lk_left = isKeyPressed(VK_LEFT) -- Left arrow
+        local lk_right = isKeyPressed(VK_RIGHT) -- Right Arrow
+        local dist_inc = isKeyPressed(VK_O) -- Increase distance
+        local dist_dec = isKeyPressed(VK_I) -- Decrease distance
+        -- Debug
+        local printval = isKeyPressed(VK_P)
+
+        -- Func: Look
+        if lk_up then
+            orbitPitch = clampAngle(orbitPitch - pitchIncrement)
+        elseif lk_down then
+            orbitPitch = clampAngle(orbitPitch + pitchIncrement)
+        end
+
+        if lk_left then
+            orbitYaw = clampAngle(orbitYaw - yawIncrement)
+        elseif lk_right then
+            orbitYaw = clampAngle(orbitYaw + yawIncrement)
+        end
+
+        -- Func: Distance
+        if dist_inc then
+            orbitDistance = orbitDistance + 0.01 -- Adjust increment as necessary
+        elseif dist_dec then
+            orbitDistance = orbitDistance - 0.01 -- Adjust increment as necessary
+        end
+
+        -- Update cam pos
+        updateOrbitCamera()
+
+        -- Debug output
+        if printval then
+           print("Pitch: " .. orbitPitch .. " Yaw: " .. orbitYaw .. " Distance: " .. orbitDistance)
+        end
+    end
+end)
+
+[DISABLE]
+
+{$asm}
+cheaton:
+dd 1 // give to "cheaton" any other value than "0" for stop thread from LUA
+
+
+
+</AssemblerScript>
+      <Hotkeys>
+        <Hotkey>
+          <Action>Activate</Action>
+          <Keys/>
+          <ID>0</ID>
+        </Hotkey>
+        <Hotkey>
+          <Action>Deactivate</Action>
+          <Keys/>
+          <ID>1</ID>
+        </Hotkey>
+      </Hotkeys>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>470</ID>
+      <Description>"Freecam-Dmr-Tracking-Implementation"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>globalalloc(cheaton,4) // global variable for createThread on/off
+
+cheaton:
+dd 0
+
+{$lua}
+
+if syntaxcheck then return end
+
+[ENABLE]
+
+{$asm}
+{$lua}
+
+local pitchIncrement = 0.005 -- Pitch speed
+local yawIncrement = 0.005 -- Yaw speed
+local rollIncrement = 0.05 -- Roll speed
+local moveSpeed = 0.075 -- Fly speed
+
+local Pitch = 0
+local Yaw = 0
+
+local isTrackingMode = false
+local fixedCamX, fixedCamY, fixedCamZ
+
+function clampAngle(angle)
+    if angle &gt; 180 then
+        angle = angle - 360
+    elseif angle &lt; -180 then
+        angle = angle + 360
+    end
+    return angle
+end
+
+-- Func: Get Car Position
+function getCarPosition(carIndex)
+    local baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+0]")
+    local offset = 0x1D4
+    local x = readFloat(baseAddress + offset)
+    local y = readFloat(baseAddress + offset + 0x4)
+    local z = readFloat(baseAddress + offset + 0x8)
+    return x, y, z
+end
+
+-- Func: Set Camera Position
+function setCameraPosition(x, y, z)
+    writeFloat("wmn5r.exe+1F52470", x)
+    writeFloat("wmn5r.exe+1F52474", y)
+    writeFloat("wmn5r.exe+1F52478", z)
+end
+
+-- Func: Update Camera
+function updateTrackingCamera()
+    local carX, carY, carZ = getCarPosition(1) -- Track Player Car
+
+    -- Calculate the direction vector from the camera to the car
+    local dirX = carX - fixedCamX
+    local dirY = carY - fixedCamY
+    local dirZ = carZ - fixedCamZ
+
+    -- Normalize the direction vector
+    local length = math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
+    dirX = dirX / length
+    dirY = dirY / length
+    dirZ = dirZ / length
+
+    -- Assume an up vector (0, 1, 0) for simplicity
+    local upX, upY, upZ = 0, 1, 0
+
+    -- Calculate the right vector using cross product
+    local rightX = upY * dirZ - upZ * dirY
+    local rightY = upZ * dirX - upX * dirZ
+    local rightZ = upX * dirY - upY * dirX
+
+    -- Normalize the right vector
+    local rightLength = math.sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ)
+    rightX = rightX / rightLength
+    rightY = rightY / rightLength
+    rightZ = rightZ / rightLength
+
+    -- Recalculate the up vector to ensure orthogonality
+    upX = dirY * rightZ - dirZ * rightY
+    upY = dirZ * rightX - dirX * rightZ
+    upZ = dirX * rightY - dirY * rightX
+
+    -- Write the rotation matrix
+    local node = getAddress("wmn5r.exe+1F52440")
+    writeFloat(node, -rightX)
+    writeFloat(node + 0x4, -rightY)
+    writeFloat(node + 0x8, -rightZ)
+    writeFloat(node + 0x10, upX)
+    writeFloat(node + 0x14, upY)
+    writeFloat(node + 0x18, upZ)
+    writeFloat(node + 0x20, -dirX)
+    writeFloat(node + 0x24, -dirY)
+    writeFloat(node + 0x28, -dirZ)
+end
+
+createNativeThread(function(timer)
+    sleep(200) -- delay for giving script time to write for "cheaton" proper value
+    while readFloat("cheaton") == 0 do -- while "cheaton" value equals "0" this cheat works
+        sleep(0) -- like timer interval
+        -- Movement
+        local lk_up = isKeyPressed(VK_UP) -- Key: Up Arrow
+        local lk_down = isKeyPressed(VK_DOWN) -- Key: Down Arrow
+        local lk_left = isKeyPressed(VK_LEFT) -- Key: Left Arrow
+        local lk_right = isKeyPressed(VK_RIGHT) -- Key: Right Arrow
+        local mv_forward = isKeyPressed(VK_W) -- Key: W
+        local mv_backward = isKeyPressed(VK_S) -- Key: S
+        local mv_strafe_left = isKeyPressed(VK_A) -- Key: A
+        local mv_strafe_right = isKeyPressed(VK_D) -- Key: D
+        local mv_Y_up = isKeyPressed(VK_SPACE) -- Key: Spacebar
+        local mv_Y_down = isKeyPressed(VK_LSHIFT) -- Key: Left Shift
+        local mode_toggle = isKeyPressed(VK_P) -- Key: P
+        -- Debug
+        local printval = isKeyPressed(VK_P)
+
+        -- Camera tracking toggle
+        if mode_toggle then
+            isTrackingMode = not isTrackingMode
+            if isTrackingMode then
+                fixedCamX, fixedCamY, fixedCamZ = readFloat("wmn5r.exe+1F52470"), readFloat("wmn5r.exe+1F52474"), readFloat("wmn5r.exe+1F52478")
+            end
+            sleep(500) -- Debounce delay to prevent multiple toggles
+        end
+
+        if isTrackingMode then
+            updateTrackingCamera()
+        else
+            -- Free fly camera controls
+            local moveSpeed = 0.1 -- Adjust speed as needed
+            local camX, camY, camZ = readFloat("wmn5r.exe+1F52470"), readFloat("wmn5r.exe+1F52474"), readFloat("wmn5r.exe+1F52478")
+            local camYaw = Yaw -- Reuse Yaw for free fly yaw control
+            local camPitch = Pitch -- Reuse Pitch for free fly pitch control
+
+            if lk_up then camPitch = camPitch - 1 end
+            if lk_down then camPitch = camPitch + 1 end
+            if lk_left then camYaw = camYaw - 1 end
+            if lk_right then camYaw = camYaw + 1 end
+
+            -- Normalize pitch and yaw
+            camPitch = clampAngle(camPitch)
+            camYaw = clampAngle(camYaw)
+
+            -- Calculate forward direction based on yaw and pitch
+            local forwardX = math.cos(math.rad(camPitch)) * math.cos(math.rad(camYaw))
+            local forwardY = math.sin(math.rad(camPitch))
+            local forwardZ = math.cos(math.rad(camPitch)) * math.sin(math.rad(camYaw))
+
+            -- Calculate right direction
+            local rightX = math.sin(math.rad(camYaw))
+            local rightZ = -math.cos(math.rad(camYaw))
+
+            -- Calculate movement
+            if mv_forward then
+                camX = camX + forwardX * moveSpeed
+                camY = camY + forwardY * moveSpeed
+                camZ = camZ + forwardZ * moveSpeed
+            end
+            if mv_backward then
+                camX = camX - forwardX * moveSpeed
+                camY = camY - forwardY * moveSpeed
+                camZ = camZ - forwardZ * moveSpeed
+            end
+            if mv_strafe_left then
+                camX = camX - rightX * moveSpeed
+                camZ = camZ - rightZ * moveSpeed
+            end
+            if mv_strafe_right then
+                camX = camX + rightX * moveSpeed
+                camZ = camZ + rightZ * moveSpeed
+            end
+            if mv_Y_up then camY = camY + moveSpeed end
+            if mv_Y_down then camY = camY - moveSpeed end
+
+            -- Update camera position
+            setCameraPosition(camX, camY, camZ)
+        end
+
+        -- Debug output
+        if printval then
+           print("Pitch: " .. Pitch .. " Yaw: " .. Yaw)
+        end
+    end
+end)
+
+[DISABLE]
+
+{$asm}
+cheaton:
+dd 1 // give to "cheaton" any other value than "0" for stop thread from LUA
+</AssemblerScript>
+      <Hotkeys>
+        <Hotkey>
+          <Action>Activate</Action>
+          <Keys/>
+          <ID>0</ID>
+        </Hotkey>
+        <Hotkey>
+          <Action>Deactivate</Action>
+          <Keys/>
+          <ID>1</ID>
+        </Hotkey>
+      </Hotkeys>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>492</ID>
+      <Description>"Freecam-Dmr-Tracking-From-Car-Implementation"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>globalalloc(cheaton,4) // global variable for createThread on/off
+
+cheaton:
+dd 0
+
+{$lua}
+
+if syntaxcheck then return end
+
+[ENABLE]
+
+{$asm}
+"wmn5r.exe"+E9930:
+db 80 b9 6c 01 00 00 00
+{$lua}
+
+local cockpitOffsetX, cockpitOffsetY, cockpitOffsetZ = 0, 10, 0
+local targetCarIndex = 2 -- Default to Car1
+
+local pitchIncrement = 0.005 -- Pitch Speed
+local yawIncrement = 0.005 -- Yaw Speed
+local rollIncrement = 0.05 -- Roll Speed
+local moveSpeed = 0.075
+
+local Pitch = 0
+local Yaw = 0
+
+local isTrackingMode = false
+local fixedCamX, fixedCamY, fixedCamZ
+
+function clampAngle(angle)
+    if angle &gt; 180 then
+        angle = angle - 360
+    elseif angle &lt; -180 then
+        angle = angle + 360
+    end
+    return angle
+end
+
+-- Func: Get Car Position
+function getCarPosition(carIndex)
+    local baseAddress
+    if carIndex == 1 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+0]")
+    elseif carIndex == 2 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+10]")
+    elseif carIndex == 3 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+8]")
+    elseif carIndex == 4 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+18]")
+    else
+        return 0, 0, 0 -- Default to (0,0,0) if invalid index
+    end
+
+    local x = readFloat(baseAddress + 0x1D4)
+    local y = readFloat(baseAddress + 0x1D8)
+    local z = readFloat(baseAddress + 0x1DC)
+    return x, y, z
+end
+
+-- Func: Update the Camera
+function updateCockpitCamera()
+    local carX, carY, carZ = getCarPosition(1) -- Assuming Car1 is the player car
+    local targetX, targetY, targetZ = getCarPosition(targetCarIndex)
+
+    -- Adjust the position based on the cockpit offset
+    local camX = carX + cockpitOffsetX
+    local camY = carY + cockpitOffsetY
+    local camZ = carZ + cockpitOffsetZ
+
+    -- Calculate the direction vector from the camera to the target car
+    local dirX = targetX - camX
+    local dirY = targetY - camY
+    local dirZ = targetZ - camZ
+
+    -- Normalize the direction vector
+    local length = math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
+    dirX = dirX / length
+    dirY = dirY / length
+    dirZ = dirZ / length
+
+    -- Assume an up vector (0, 1, 0) for simplicity
+    local upX, upY, upZ = 0, 1, 0
+
+    -- Calculate the right vector using cross product
+    local rightX = upY * dirZ - upZ * dirY
+    local rightY = upZ * dirX - upX * dirZ
+    local rightZ = upX * dirY - upY * dirX
+
+    -- Normalize the right vector
+    local rightLength = math.sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ)
+    rightX = rightX / rightLength
+    rightY = rightY / rightLength
+    rightZ = rightZ / rightLength
+
+    -- Recalculate the up vector to ensure orthogonality
+    upX = dirY * rightZ - dirZ * rightY
+    upY = dirZ * rightX - dirX * rightZ
+    upZ = dirX * rightY - dirY * rightX
+
+    -- Write the rotation matrix
+    local node = getAddress("wmn5r.exe+1F52440")
+    writeFloat(node, -rightX)
+    writeFloat(node + 0x4, -rightY)
+    writeFloat(node + 0x8, -rightZ)
+    writeFloat(node + 0x10, upX)
+    writeFloat(node + 0x14, upY)
+    writeFloat(node + 0x18, upZ)
+    writeFloat(node + 0x20, -dirX)
+    writeFloat(node + 0x24, -dirY)
+    writeFloat(node + 0x28, -dirZ)
+    writeFloat(node + 0x30, camX)
+    writeFloat(node + 0x34, camY)
+    writeFloat(node + 0x38, camZ)
+end
+
+createNativeThread(function(timer)
+    sleep(200) -- delay for giving script time to write for "cheaton" proper value
+    while readFloat("cheaton") == 0 do -- while "cheaton" value equals "0" this cheat works
+        sleep(0) -- like timer interval
+        -- Movement
+        local mv_forward = isKeyPressed(VK_W) -- Key: W
+        local mv_backward = isKeyPressed(VK_S) -- Key: S
+        local mv_left = isKeyPressed(VK_A) -- Key: A
+        local mv_right = isKeyPressed(VK_D) -- Key: D
+        local mv_Y_up = isKeyPressed(VK_SPACE) -- Key: Spacebar
+        local mv_Y_down = isKeyPressed(VK_LSHIFT) -- Key: Left Shift
+        local switch_car1 = isKeyPressed(VK_1) -- Key: 1
+        local switch_car2 = isKeyPressed(VK_2) -- Key: 2
+        local switch_car3 = isKeyPressed(VK_3) -- Key: 3
+        local switch_car4 = isKeyPressed(VK_4) -- Key: 4
+        -- Debug
+        local printval = isKeyPressed(VK_P)
+
+        -- Switch target car based on key pressed
+        if switch_car1 then targetCarIndex = 1 end
+        if switch_car2 then targetCarIndex = 2 end
+        if switch_car3 then targetCarIndex = 3 end
+        if switch_car4 then targetCarIndex = 4 end
+
+         -- Adjust cockpit offset for fine-tuning
+        if mv_forward then cockpitOffsetX = cockpitOffsetX + 0.01 end
+        if mv_backward then cockpitOffsetX = cockpitOffsetX - 0.01 end
+        if mv_left then cockpitOffsetZ = cockpitOffsetZ - 0.01 end
+        if mv_right then cockpitOffsetZ = cockpitOffsetZ + 0.01 end
+        if mv_Y_up then cockpitOffsetY = cockpitOffsetY + 0.01 end
+        if mv_Y_down then cockpitOffsetY = cockpitOffsetY - 0.01 end
+
+        updateCockpitCamera()
+
+        -- Debug output
+        if printval then
+           --print("Pitch: " .. Pitch .. " Yaw: " .. Yaw .. " Distance: " .. orbitDistance)
+           print("OffsetX: " .. cockpitOffsetX .. " OffsetY: " .. cockpitOffsetY .. " OffsetZ: " .. cockpitOffsetZ)
+        end
+    end
+end)
+
+[DISABLE]
+
+{$asm}
+"wmn5r.exe"+E9930:
+db 80 b9 6c 01 00 00 00
+
+cheaton:
+dd 1 // give to "cheaton" any other value than "0" for stop thread from LUA
+
+
+
+</AssemblerScript>
+      <Hotkeys>
+        <Hotkey>
+          <Action>Activate</Action>
+          <Keys/>
+          <ID>0</ID>
+        </Hotkey>
+        <Hotkey>
+          <Action>Deactivate</Action>
+          <Keys/>
+          <ID>1</ID>
+        </Hotkey>
+      </Hotkeys>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>483</ID>
+      <Description>"Freecam-Dmr-Custom-Chase-Implementation"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>globalalloc(cheaton,4) // global variable for createThread on/off
+
+cheaton:
+dd 0
+
+{$lua}
+
+if syntaxcheck then return end
+
+[ENABLE]
+
+{$asm}
+{$lua}
+
+local chaseDistance = 40.0
+local chasePitch = 0.0
+local chaseSensitivity = 1.0
+local chaseOffsetX = 0.0
+local chaseOffsetY = 0.0
+local targetCarIndex = 1
+local cameraControlEnabled = true
+
+-- Func: Set Cam Position
+function setCameraPosition(x, y, z)
+    writeFloat("wmn5r.exe+1F52470", x)
+    writeFloat("wmn5r.exe+1F52474", y)
+    writeFloat("wmn5r.exe+1F52478", z)
+end
+
+-- Func : Get Car Matrix
+function getCarRotationAndPosition(carIndex)
+    local baseAddress
+    if carIndex == 1 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+0]")
+    elseif carIndex == 2 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+10]")
+    elseif carIndex == 3 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+8]")
+    elseif carIndex == 4 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+18]")
+    else
+        return nil -- Return nil if invalid index
+    end
+
+    local rotationMatrix = {
+        rightX = readFloat(baseAddress + 0x1A4),
+        rightY = readFloat(baseAddress + 0x1A8),
+        rightZ = readFloat(baseAddress + 0x1AC),
+        upX = readFloat(baseAddress + 0x1B4),
+        upY = readFloat(baseAddress + 0x1B8),
+        upZ = readFloat(baseAddress + 0x1BC),
+        dirX = readFloat(baseAddress + 0x1C4),
+        dirY = readFloat(baseAddress + 0x1C8),
+        dirZ = readFloat(baseAddress + 0x1CC),
+        posX = readFloat(baseAddress + 0x1D4),
+        posY = readFloat(baseAddress + 0x1D8),
+        posZ = readFloat(baseAddress + 0x1DC),
+    }
+
+    return rotationMatrix
+end
+
+-- Func: Calculate angle between two points
+function calculateAngle(x1, y1, x2, y2)
+    return math.atan2(y2 - y1, x2 - x1)
+end
+
+-- Func: Update the chase camera
+function updateChaseCamera()
+    local carData = getCarRotationAndPosition(targetCarIndex)
+    if not carData then return end
+
+    -- Calculate the chase camera position based on the car's position and direction
+    local camX = carData.posX - carData.dirX * chaseDistance + carData.rightX * chaseOffsetX
+    local camY = carData.posY - carData.dirY * chaseDistance + math.sin(chasePitch) * chaseDistance + carData.upY * chaseOffsetY
+    local camZ = carData.posZ - carData.dirZ * chaseDistance + carData.rightZ * chaseOffsetX
+
+    -- Adjust the camera angle for pitch
+    local dirX = carData.dirX * math.cos(chasePitch) - carData.upX * math.sin(chasePitch)
+    local dirY = carData.dirY * math.cos(chasePitch) - carData.upY * math.sin(chasePitch)
+    local dirZ = carData.dirZ * math.cos(chasePitch) - carData.upZ * math.sin(chasePitch)
+
+    -- Calculate the right vector using cross product
+    local rightX = carData.upY * dirZ - carData.upZ * dirY
+    local rightY = carData.upZ * dirX - carData.upX * dirZ
+    local rightZ = carData.upX * dirY - carData.upY * dirX
+
+    -- Normalize the right vector
+    local rightLength = math.sqrt(carData.rightX * carData.rightX + carData.rightY * carData.rightY + carData.rightZ * carData.rightZ)
+    carData.rightX = carData.rightX / rightLength
+    carData.rightY = carData.rightY / rightLength
+    carData.rightZ = carData.rightZ / rightLength
+
+    -- Recalculate the up vector to ensure orthogonality
+    carData.upX = dirY * carData.rightZ - dirZ * carData.rightY
+    carData.upY = dirZ * carData.rightX - dirX * carData.rightZ
+    carData.upZ = dirX * carData.rightY - dirY * carData.rightX
+
+    -- Write the rotation matrix
+    local node = getAddress("wmn5r.exe+1F52440")
+    writeFloat(node, -carData.rightX)
+    writeFloat(node + 0x4, -carData.rightY)
+    writeFloat(node + 0x8, -carData.rightZ)
+    writeFloat(node + 0x10, carData.upX)
+    writeFloat(node + 0x14, carData.upY)
+    writeFloat(node + 0x18, carData.upZ)
+    writeFloat(node + 0x20, -dirX)
+    writeFloat(node + 0x24, -dirY)
+    writeFloat(node + 0x28, -dirZ)
+
+    -- Set the camera position
+    setCameraPosition(camX, camY, camZ)
+end
+
+createNativeThread(function(timer)
+    sleep(200) -- delay for giving script time to write for "cheaton" proper value
+    while readFloat("cheaton") == 0 do -- while "cheaton" value equals "0" this cheat works
+        sleep(0) -- like timer interval
+
+        local dist_inc = isKeyPressed(VK_W) -- Key: W
+        local dist_dec = isKeyPressed(VK_S) -- Key: S
+        local pitch_up = isKeyPressed(VK_SPACE) -- Key: Space
+        local pitch_down = isKeyPressed(VK_LSHIFT) -- -- Key: Left Shift
+        local inertia_inc = isKeyPressed(VK_D) -- Increase inertia (UNUSED, FUNC NOT IMPLEMENTED)
+        local inertia_dec = isKeyPressed(VK_A) -- Decrease inertia *UNUSED, FUNC NOT IMPLEMENTED)
+        local offset_left = isKeyPressed(VK_J) -- Key: J
+        local offset_right = isKeyPressed(VK_L) -- Key: L
+        local offset_up = isKeyPressed(VK_I) -- Key: I
+        local offset_down = isKeyPressed(VK_K) -- Key: K
+        local switch_car1 = isKeyPressed(VK_1) -- Switch to Car1
+        local switch_car2 = isKeyPressed(VK_2) -- Switch to Car2
+        local switch_car3 = isKeyPressed(VK_3) -- Switch to Car3
+        local switch_car4 = isKeyPressed(VK_4) -- Switch to Car4
+        local toggle_camera = isKeyPressed(VK_M) -- Toggle camera control
+        local printval = isKeyPressed(VK_M)
+
+        -- Toggle Camera Controls
+        if isKeyPressed(VK_P) then
+            cameraControlEnabled = not cameraControlEnabled -- Toggle camera control state
+            print("Chase Camera Controls: " .. (cameraControlEnabled and "Enabled" or "Disabled"))
+            sleep(300) -- Debounce for key press
+        end
+
+        --Switch target car based on key pressed
+        if switch_car1 and targetCarIndex~= 1 then
+            targetCarIndex = 1
+            sleep(300)
+        end
+
+        if switch_car2 and targetCarIndex~= 2 then
+            targetCarIndex = 2
+            sleep(300)
+        end
+        if switch_car3 and targetCarIndex~= 3 then
+            targetCarIndex = 3
+            sleep(300)
+        end
+        if switch_car4 and targetCarIndex~= 4 then
+            targetCarIndex = 4
+            sleep(300)
+        end
+
+        if cameraControlEnabled then
+            -- Adjust chase camera parameters
+            if dist_inc then chaseDistance = chaseDistance + 0.001 end
+            if dist_dec then chaseDistance = chaseDistance - 0.001 end
+            if pitch_up then chasePitch = chasePitch + 0.0005 end
+            if pitch_down then chasePitch = chasePitch - 0.0005 end
+            if inertia_dec then chaseSensitivity = chaseSensitivity - 0.1 end
+            if inertia_inc then chaseSensitivity = chaseSensitivity + 0.1 end
+
+            -- Adjust cam offset
+            if offset_right then chaseOffsetX = chaseOffsetX - 0.001 end
+            if offset_left then chaseOffsetX = chaseOffsetX + 0.001 end
+            if offset_up then chaseOffsetY = chaseOffsetY + 0.001 end
+            if offset_down then chaseOffsetY = chaseOffsetY - 0.001 end
+
+            -- Ensure sensitivity is within a reasonable range
+            if chaseSensitivity &lt; 0.1 then chaseSensitivity = 0.1 end
+            if chaseSensitivity &gt; 5.0 then chaseSensitivity = 5.0 end
+
+            -- Debug output
+            if printval then
+               print("Chase Camera: Target Car: " .. tostring(targetCarIndex) .. " Distance: " .. chaseDistance .. " Pitch: " .. chasePitch .. " Sensitivity: " .. chaseSensitivity)
+               sleep(500)
+            end
+        end
+
+        updateChaseCamera()
+    end
+end)
+
+-- Ensure the initial values are set for the current car position and orientation
+local initialCarData = getCarRotationAndPosition(targetCarIndex)
+if initialCarData then
+    previousPosX, previousPosY, previousPosZ = initialCarData.posX, initialCarData.posY, initialCarData.posZ
+    currentRightX, currentRightY, currentRightZ = initialCarData.rightX, initialCarData.rightY, initialCarData.rightZ
+    currentUpX, currentUpY, currentUpZ = initialCarData.upX, initialCarData.upY, initialCarData.upZ
+    currentDirX, currentDirY, currentDirZ = initialCarData.dirX, initialCarData.dirY, initialCarData.dirZ
+end
+
+[DISABLE]
+
+{$asm}
+cheaton:
+dd 1 // give to "cheaton" any other value than "0" for stop thread from LUA
+
+
+
+</AssemblerScript>
+      <Hotkeys>
+        <Hotkey>
+          <Action>Activate</Action>
+          <Keys/>
+          <ID>0</ID>
+        </Hotkey>
+        <Hotkey>
+          <Action>Deactivate</Action>
+          <Keys/>
+          <ID>1</ID>
+        </Hotkey>
+      </Hotkeys>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>487</ID>
+      <Description>"Freecam-Dmr-Mounted-Cam-Implementation"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript>globalalloc(cheaton,4) // global variable for createThread on/off
+
+cheaton:
+dd 0
+
+{$lua}
+
+if syntaxcheck then return end
+
+[ENABLE]
+
+{$asm}
+{$lua}
+
+local mountedDistance = 10.0
+local mountedPitch = 0.0
+local mountedYaw = 0.0
+local mountedRoll = 0.0
+local mountedOffsetX = 0.0
+local mountedOffsetY = 0.0
+local targetCarIndex = 1
+local cameraControlEnabled = true
+
+local savedCameras = {}
+
+-- Func: Set Cam Position
+function setCameraPosition(x, y, z)
+    writeFloat("wmn5r.exe+1F52470", x)
+    writeFloat("wmn5r.exe+1F52474", y)
+    writeFloat("wmn5r.exe+1F52478", z)
+end
+
+-- Func : Get Car Matrix
+function getCarRotationAndPosition(carIndex)
+    local baseAddress
+    if carIndex == 1 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+0]")
+    elseif carIndex == 2 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+10]")
+    elseif carIndex == 3 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+8]")
+    elseif carIndex == 4 then
+        baseAddress = getAddress("[[[[wmn5r.exe+01F52270]+8]+8]+18]")
+    else
+        return nil -- Return nil if invalid index
+    end
+
+    local rotationMatrix = {
+        rightX = readFloat(baseAddress + 0x1A4),
+        rightY = readFloat(baseAddress + 0x1A8),
+        rightZ = readFloat(baseAddress + 0x1AC),
+        upX = readFloat(baseAddress + 0x1B4),
+        upY = readFloat(baseAddress + 0x1B8),
+        upZ = readFloat(baseAddress + 0x1BC),
+        dirX = readFloat(baseAddress + 0x1C4),
+        dirY = readFloat(baseAddress + 0x1C8),
+        dirZ = readFloat(baseAddress + 0x1CC),
+        posX = readFloat(baseAddress + 0x1D4),
+        posY = readFloat(baseAddress + 0x1D8),
+        posZ = readFloat(baseAddress + 0x1DC),
+    }
+
+    return rotationMatrix
+end
+
+-- Function to calculate angle between two points
+function calculateAngle(x1, y1, x2, y2)
+    return math.atan2(y2 - y1, x2 - x1)
+end
+
+-- Function to update the mounted camera
+function updateMountedCamera()
+    local carData = getCarRotationAndPosition(targetCarIndex)
+    if not carData then return end
+
+    -- Apply pitch, yaw, and roll
+    local cosYaw = math.cos(mountedYaw)
+    local sinYaw = math.sin(mountedYaw)
+    local cosPitch = math.cos(mountedPitch)
+    local sinPitch = math.sin(mountedPitch)
+    local cosRoll = math.cos(mountedRoll)
+    local sinRoll = math.sin(mountedRoll)
+
+    local dirX = carData.dirX * cosYaw * cosPitch + carData.rightX * sinYaw * cosPitch - carData.upX * sinPitch
+    local dirY = carData.dirY * cosYaw * cosPitch + carData.rightY * sinYaw * cosPitch - carData.upY * sinPitch
+    local dirZ = carData.dirZ * cosYaw * cosPitch + carData.rightZ * sinYaw * cosPitch - carData.upZ * sinPitch
+
+    local rightX = carData.rightX * cosYaw - carData.dirX * sinYaw
+    local rightY = carData.rightY * cosYaw - carData.dirY * sinYaw
+    local rightZ = carData.rightZ * cosYaw - carData.dirZ * sinYaw
+
+    local upX = carData.upX * cosRoll - rightX * sinRoll
+    local upY = carData.upY * cosRoll - rightY * sinRoll
+    local upZ = carData.upZ * cosRoll - rightZ * sinRoll
+    rightX = carData.upX * sinRoll + rightX * cosRoll
+    rightY = carData.upY * sinRoll + rightY * cosRoll
+    rightZ = carData.upZ * sinRoll + rightZ * cosRoll
+
+    -- Calculate the mounted camera position based on the car's position and direction
+    local camX = carData.posX + carData.rightX * mountedOffsetX + carData.upX * mountedOffsetY + carData.dirX * mountedDistance
+    local camY = carData.posY + carData.rightY * mountedOffsetX + carData.upY * mountedOffsetY + carData.dirY * mountedDistance
+    local camZ = carData.posZ + carData.rightZ * mountedOffsetX + carData.upZ * mountedOffsetY + carData.dirZ * mountedDistance
+
+    -- Calculate the right vector using cross product
+    local rightX = carData.upY * dirZ - carData.upZ * dirY
+    local rightY = carData.upZ * dirX - carData.upX * dirZ
+    local rightZ = carData.upX * dirY - carData.upY * dirX
+
+    -- Normalize the right vector
+    local rightLength = math.sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ)
+    rightX = rightX / rightLength
+    rightY = rightY / rightLength
+    rightZ = rightZ / rightLength
+
+    -- Recalculate the up vector to ensure orthogonality
+    upX = dirY * rightZ - dirZ * rightY
+    upY = dirZ * rightX - dirX * rightZ
+    upZ = dirX * rightY - dirY * rightX
+
+    -- Write the rotation matrix
+    local node = getAddress("wmn5r.exe+1F52440")
+    writeFloat(node, -rightX)
+    writeFloat(node + 0x4, -rightY)
+    writeFloat(node + 0x8, -rightZ)
+    writeFloat(node + 0x10, upX)
+    writeFloat(node + 0x14, upY)
+    writeFloat(node + 0x18, upZ)
+    writeFloat(node + 0x20, -dirX)
+    writeFloat(node + 0x24, -dirY)
+    writeFloat(node + 0x28, -dirZ)
+
+    -- Set the camera position
+    setCameraPosition(camX, camY, camZ)
+end
+
+-- Function to save the current camera configuration
+function saveCurrentCamera(index)
+    savedCameras[index] = {
+        distance = mountedDistance,
+        pitch = mountedPitch,
+        yaw = mountedYaw,
+        roll = mountedRoll,
+        offsetX = mountedOffsetX,
+        offsetY = mountedOffsetY,
+    }
+end
+
+-- Function to load a saved camera configuration
+function loadSavedCamera(index)
+    if savedCameras[index] then
+        mountedDistance = savedCameras[index].distance
+        mountedPitch = savedCameras[index].pitch
+        mountedYaw = savedCameras[index].yaw
+        mountedRoll = savedCameras[index].roll
+        mountedOffsetX = savedCameras[index].offsetX
+        mountedOffsetY = savedCameras[index].offsetY
+    end
+end
+
+createNativeThread(function(timer)
+    sleep(200) -- delay for giving script time to write for "cheaton" proper value
+    while readFloat("cheaton") == 0 do -- while "cheaton" value equals "0" this cheat works
+        sleep(0) -- like timer interval
+
+        local mv_forward = isKeyPressed(VK_W) -- Key: W
+        local mv_backward = isKeyPressed(VK_S) -- Key: S
+        local pitch_up = isKeyPressed(VK_SPACE) -- Key: Spacebar
+        local pitch_down = isKeyPressed(VK_LSHIFT) -- Key: Left Shift
+        local lk_left = isKeyPressed(VK_J) -- Key: J
+        local lk_right = isKeyPressed(VK_L) -- Key: L
+        local offset_left = isKeyPressed(VK_A) -- Key: A
+        local offset_right = isKeyPressed(VK_D) -- Key: D
+        local offset_up = isKeyPressed(VK_I) -- Key: I
+        local offset_down = isKeyPressed(VK_K) -- Key: K
+        local increase_roll = isKeyPressed(VK_Q) -- Key: Q [UNUSED, NONE FUNCTIONAL]
+        local decrease_roll = isKeyPressed(VK_E) -- Key: E [UNUSED, NONE FUNCTIONAL]
+        local switch_car1 = isKeyPressed(VK_1) -- Switch to Car1
+        local switch_car2 = isKeyPressed(VK_2) -- Switch to Car2
+        local switch_car3 = isKeyPressed(VK_3) -- Switch to Car3
+        local switch_car4 = isKeyPressed(VK_4) -- Switch to Car4
+        local toggle_camera = isKeyPressed(VK_M) -- Toggle camera control
+        local printval = isKeyPressed(VK_M)
+
+        -- Toggle Camera Controls
+        if isKeyPressed(VK_P) then
+            cameraControlEnabled = not cameraControlEnabled -- Toggle camera control state
+            print("Chase Camera Controls: " .. (cameraControlEnabled and "Enabled" or "Disabled"))
+            sleep(300) -- Debounce for key press
+        end
+
+        if cameraControlEnabled then
+
+            -- Switch target car based on key pressed
+            if switch_car1 then targetCarIndex = 1 end
+            if switch_car2 then targetCarIndex = 2 end
+            if switch_car3 then targetCarIndex = 3 end
+            if switch_car4 then targetCarIndex = 4 end
+
+             -- Adjust mounted camera parameters
+            if mv_forward then mountedDistance = mountedDistance + 0.01 end
+            if mv_backward then mountedDistance = mountedDistance - 0.01 end
+            -- Pitch
+            if pitch_up then mountedPitch = mountedPitch + 0.0001 end
+            if pitch_down then mountedPitch = mountedPitch - 0.0001 end
+            -- Yaw
+            if lk_left then mountedYaw = mountedYaw - 0.00025 end
+            if lk_right then mountedYaw = mountedYaw + 0.00025 end
+            -- Roll [UNUSED, NONE FUNCTIONAL]
+            if increase_roll then mountedRoll = mountedRoll + 0.001 end
+            if decrease_roll then mountedRoll = mountedRoll - 0.001 end
+
+            -- Adjust cam offset
+            if offset_left then mountedOffsetX = mountedOffsetX + 0.001 end
+            if offset_right then mountedOffsetX = mountedOffsetX - 0.001 end
+            if offset_up then mountedOffsetY = mountedOffsetY + 0.001 end
+            if offset_down then mountedOffsetY = mountedOffsetY - 0.001 end
+
+            -- Save camera configuration with number keys 0-9 [UNUSED, NONE FUNCTIONAL]
+            for i = 0, 9 do
+                if isKeyPressed(VK_0 + i) then
+                    saveCurrentCamera(i)
+                    sleep(500) -- debounce to prevent multiple saves
+                end
+            end
+
+            -- Load camera configuration with number keys 0-9 [UNUSED, NONE FUNCTIONAL]
+            for i = 0, 9 do
+                if isKeyPressed(VK_NUMPAD0 + i) then
+                    loadSavedCamera(i)
+                    sleep(500) -- debounce to prevent multiple loads
+                end
+            end
+
+            -- Debug output
+            if printval then
+               print("Mounted Camera: Target Car: " .. tostring(targetCarIndex) .. " Distance: " .. mountedDistance .. " Pitch: " .. mountedPitch .. " Yaw: " .. mountedYaw .. " Roll: " .. mountedRoll .. " OffsetX: " .. mountedOffsetX .. " OffsetY: " .. mountedOffsetY)
+            end
+        end
+        updateMountedCamera()
+    end
+end)
+
+[DISABLE]
+
+{$asm}
+cheaton:
+dd 1 // give to "cheaton" any other value than "0" for stop thread from LUA
+
+
+
+</AssemblerScript>
+      <Hotkeys>
+        <Hotkey>
+          <Action>Activate</Action>
+          <Keys/>
+          <ID>0</ID>
+        </Hotkey>
+        <Hotkey>
+          <Action>Deactivate</Action>
+          <Keys/>
+          <ID>1</ID>
+        </Hotkey>
+      </Hotkeys>
+    </CheatEntry>
+  </CheatEntries>
+  <UserdefinedSymbols/>
+</CheatTable>
